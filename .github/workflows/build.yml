@@ -1,6 +1,6 @@
-name: Manual_Build_TDLib_Windows
+name: Manual_Build_TDLib_Windows_Fixed
 
-# 关键设置：只保留这个，GitHub 永远不会自动运行
+# 彻底禁用自动运行，仅允许手动触发
 on:
   workflow_dispatch:
     inputs:
@@ -12,36 +12,72 @@ on:
 jobs:
   build_job:
     runs-on: windows-2022
+    
     steps:
       - name: 1. 安装必要的工具链 (Choco)
         run: |
+          # 强制安装 64 位 OpenSSL 并忽略版本冲突
           choco install cmake gperf php openssl -y
 
       - name: 2. 下载 TDLib 源码
         uses: actions/checkout@v4
         with:
           repository: tdlib/td
-          # 使用手动输入的分支名，默认为 master
           ref: ${{ github.event.inputs.branch }}
 
-      - name: 3. 配置 CMake (含 OpenSSL 路径)
+      - name: 3. 探测 OpenSSL 路径并配置 CMake
+        shell: pwsh
         run: |
+          # 自动寻找 OpenSSL 的安装位置
+          $sslPath = ""
+          $possiblePaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\Program Files (x86)\OpenSSL")
+          foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\include\openssl\ssl.h") {
+                  $sslPath = $p
+                  break
+              }
+          }
+
+          if ($sslPath -eq "") {
+              Write-Error "无法定位 OpenSSL 安装目录，请检查 Choco 安装日志。"
+              exit 1
+          }
+
+          Write-Host "成功定位 OpenSSL: $sslPath"
+          
+          # 创建编译目录
           mkdir build
           cd build
+          
+          # 配置 CMake，显式传递探测到的 OpenSSL 路径
           cmake -A x64 `
                 -DCMAKE_INSTALL_PREFIX:PATH=../tdlib_install `
-                -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" `
+                -DOPENSSL_ROOT_DIR="$sslPath" `
                 -DCMAKE_BUILD_TYPE=Release ..
 
       - name: 4. 执行编译 (Release 模式)
+        shell: pwsh
         run: |
           cd build
+          # 使用 4 核并行编译以节省时间
           cmake --build . --target install --config Release --parallel 4
 
       - name: 5. 整理依赖 DLL 文件
+        shell: pwsh
         run: |
-          # 将 OpenSSL 的运行库拷贝到输出目录，方便直接给 Python 使用
-          copy "C:/Program Files/OpenSSL-Win64/bin/*.dll" "tdlib_install/bin/"
+          # 再次确认 OpenSSL 路径以便拷贝运行时 DLL
+          $sslPath = ""
+          $possiblePaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL")
+          foreach ($p in $possiblePaths) {
+              if (Test-Path "$p\bin") { $sslPath = $p; break }
+          }
+
+          if ($sslPath -ne "") {
+              Write-Host "正在从 $sslPath\bin 拷贝依赖 DLL..."
+              if (!(Test-Path "tdlib_install/bin")) { New-Item -ItemType Directory -Path "tdlib_install/bin" }
+              # 拷贝 libcrypto 和 libssl 的 dll 文件
+              Copy-Item "$sslPath\bin\*.dll" "tdlib_install/bin/" -Force -ErrorAction SilentlyContinue
+          }
 
       - name: 6. 上传最终产物
         uses: actions/upload-artifact@v4
