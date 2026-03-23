@@ -1,11 +1,10 @@
-name: Manual_Build_TDLib_Windows_Fixed
+name: Manual_Build_TDLib_Windows_Final
 
-# 彻底禁用自动运行，仅允许手动触发
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: '选择要编译的 TDLib 分支 (默认 master)'
+        description: '选择要编译的 TDLib 分支'
         required: true
         default: 'master'
 
@@ -14,10 +13,10 @@ jobs:
     runs-on: windows-2022
     
     steps:
-      - name: 1. 安装必要的工具链 (Choco)
+      - name: 1. 安装所有必要工具 (含 ZLIB)
         run: |
-          # 强制安装 64 位 OpenSSL 并忽略版本冲突
-          choco install cmake gperf php openssl -y
+          # 增加 zlib 安装
+          choco install cmake gperf php openssl zlib -y
 
       - name: 2. 下载 TDLib 源码
         uses: actions/checkout@v4
@@ -25,62 +24,55 @@ jobs:
           repository: tdlib/td
           ref: ${{ github.event.inputs.branch }}
 
-      - name: 3. 探测 OpenSSL 路径并配置 CMake
+      - name: 3. 探测路径并配置 CMake
         shell: pwsh
         run: |
-          # 自动寻找 OpenSSL 的安装位置
+          # 自动寻找 OpenSSL 路径
           $sslPath = ""
-          $possiblePaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL", "C:\Program Files (x86)\OpenSSL")
-          foreach ($p in $possiblePaths) {
-              if (Test-Path "$p\include\openssl\ssl.h") {
-                  $sslPath = $p
-                  break
-              }
+          $possibleSslPaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL")
+          foreach ($p in $possibleSslPaths) {
+              if (Test-Path "$p\include\openssl\ssl.h") { $sslPath = $p; break }
           }
 
-          if ($sslPath -eq "") {
-              Write-Error "无法定位 OpenSSL 安装目录，请检查 Choco 安装日志。"
-              exit 1
-          }
-
-          Write-Host "成功定位 OpenSSL: $sslPath"
+          # 自动寻找 ZLIB 路径 (Choco 默认路径)
+          $zlibPath = "C:\Program Files\zlib"
           
-          # 创建编译目录
+          Write-Host "OpenSSL 路径: $sslPath"
+          Write-Host "ZLIB 路径: $zlibPath"
+          
           mkdir build
           cd build
           
-          # 配置 CMake，显式传递探测到的 OpenSSL 路径
+          # 配置时显式指定 ZLIB 的库文件和头文件路径
           cmake -A x64 `
                 -DCMAKE_INSTALL_PREFIX:PATH=../tdlib_install `
                 -DOPENSSL_ROOT_DIR="$sslPath" `
+                -DZLIB_INCLUDE_DIR="$zlibPath\include" `
+                -DZLIB_LIBRARY="$zlibPath\lib\zlib.lib" `
                 -DCMAKE_BUILD_TYPE=Release ..
 
-      - name: 4. 执行编译 (Release 模式)
+      - name: 4. 执行编译
         shell: pwsh
         run: |
           cd build
-          # 使用 4 核并行编译以节省时间
           cmake --build . --target install --config Release --parallel 4
 
-      - name: 5. 整理依赖 DLL 文件
+      - name: 5. 整理所有 DLL 文件
         shell: pwsh
         run: |
-          # 再次确认 OpenSSL 路径以便拷贝运行时 DLL
-          $sslPath = ""
-          $possiblePaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL")
-          foreach ($p in $possiblePaths) {
-              if (Test-Path "$p\bin") { $sslPath = $p; break }
+          if (!(Test-Path "tdlib_install/bin")) { New-Item -ItemType Directory -Path "tdlib_install/bin" }
+          
+          # 拷贝 OpenSSL 的 DLL
+          $sslBin = if (Test-Path "C:\Program Files\OpenSSL-Win64\bin") { "C:\Program Files\OpenSSL-Win64\bin" } else { "C:\Program Files\OpenSSL\bin" }
+          Copy-Item "$sslBin\*.dll" "tdlib_install/bin/" -Force -ErrorAction SilentlyContinue
+          
+          # 拷贝 ZLIB 的 DLL
+          if (Test-Path "C:\Program Files\zlib\bin\zlib1.dll") {
+              Copy-Item "C:\Program Files\zlib\bin\zlib1.dll" "tdlib_install/bin/" -Force
           }
 
-          if ($sslPath -ne "") {
-              Write-Host "正在从 $sslPath\bin 拷贝依赖 DLL..."
-              if (!(Test-Path "tdlib_install/bin")) { New-Item -ItemType Directory -Path "tdlib_install/bin" }
-              # 拷贝 libcrypto 和 libssl 的 dll 文件
-              Copy-Item "$sslPath\bin\*.dll" "tdlib_install/bin/" -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: 6. 上传最终产物
+      - name: 6. 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: tdlib-windows-x64-manual
+          name: tdlib-windows-x64-ready
           path: tdlib_install/bin/*.dll
