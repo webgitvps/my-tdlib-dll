@@ -1,78 +1,69 @@
-name: Manual_Build_TDLib_Windows_Final
+name: Manual_Build_TDLib_Final_v3
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: '选择要编译的 TDLib 分支'
-        required: true
-        default: 'master'
 
 jobs:
   build_job:
     runs-on: windows-2022
     
     steps:
-      - name: 1. 安装所有必要工具 (含 ZLIB)
+      - name: 1. 环境准备 (不含 zlib)
         run: |
-          # 增加 zlib 安装
-          choco install cmake gperf php openssl zlib -y
+          choco install cmake gperf php openssl -y
 
       - name: 2. 下载 TDLib 源码
         uses: actions/checkout@v4
         with:
           repository: tdlib/td
-          ref: ${{ github.event.inputs.branch }}
+          ref: master
 
-      - name: 3. 探测路径并配置 CMake
+      - name: 3. 手动获取并配置 ZLIB 与 CMake
         shell: pwsh
         run: |
-          # 自动寻找 OpenSSL 路径
-          $sslPath = ""
-          $possibleSslPaths = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL")
-          foreach ($p in $possibleSslPaths) {
-              if (Test-Path "$p\include\openssl\ssl.h") { $sslPath = $p; break }
-          }
+          # --- 手动下载并准备 ZLIB ---
+          Invoke-WebRequest -Uri "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.zip" -OutFile "zlib.zip"
+          Expand-Archive -Path "zlib.zip" -DestinationPath "."
+          Rename-Item -Path "zlib-1.3.1" -NewName "zlib_src"
+          
+          # 预编译 zlib (因为 choco 找不到它)
+          mkdir zlib_build; cd zlib_build
+          cmake -A x64 -DCMAKE_INSTALL_PREFIX:PATH=../zlib_install ../zlib_src
+          cmake --build . --target install --config Release
+          cd ..
 
-          # 自动寻找 ZLIB 路径 (Choco 默认路径)
-          $zlibPath = "C:\Program Files\zlib"
-          
-          Write-Host "OpenSSL 路径: $sslPath"
-          Write-Host "ZLIB 路径: $zlibPath"
-          
-          mkdir build
-          cd build
-          
-          # 配置时显式指定 ZLIB 的库文件和头文件路径
+          # --- 定位 OpenSSL ---
+          $sslPath = "C:\Program Files\OpenSSL"
+          if (!(Test-Path "$sslPath\include\openssl\ssl.h")) { $sslPath = "C:\Program Files\OpenSSL-Win64" }
+
+          # --- 配置 TDLib ---
+          mkdir build; cd build
           cmake -A x64 `
                 -DCMAKE_INSTALL_PREFIX:PATH=../tdlib_install `
                 -DOPENSSL_ROOT_DIR="$sslPath" `
-                -DZLIB_INCLUDE_DIR="$zlibPath\include" `
-                -DZLIB_LIBRARY="$zlibPath\lib\zlib.lib" `
+                -DZLIB_INCLUDE_DIR="../zlib_install/include" `
+                -DZLIB_LIBRARY="../zlib_install/lib/zlib.lib" `
                 -DCMAKE_BUILD_TYPE=Release ..
 
-      - name: 4. 执行编译
+      - name: 4. 执行 TDLib 编译 (最耗时步骤)
         shell: pwsh
         run: |
           cd build
           cmake --build . --target install --config Release --parallel 4
 
-      - name: 5. 整理所有 DLL 文件
+      - name: 5. 整理 DLL 产物
         shell: pwsh
         run: |
           if (!(Test-Path "tdlib_install/bin")) { New-Item -ItemType Directory -Path "tdlib_install/bin" }
-          
-          # 拷贝 OpenSSL 的 DLL
+          # 拷贝 tdjson.dll
+          # 拷贝 OpenSSL 依赖
           $sslBin = if (Test-Path "C:\Program Files\OpenSSL-Win64\bin") { "C:\Program Files\OpenSSL-Win64\bin" } else { "C:\Program Files\OpenSSL\bin" }
           Copy-Item "$sslBin\*.dll" "tdlib_install/bin/" -Force -ErrorAction SilentlyContinue
-          
-          # 拷贝 ZLIB 的 DLL
-          if (Test-Path "C:\Program Files\zlib\bin\zlib1.dll") {
-              Copy-Item "C:\Program Files\zlib\bin\zlib1.dll" "tdlib_install/bin/" -Force
-          }
+          # 拷贝刚才自己编译的 zlib1.dll
+          Copy-Item "zlib_install/bin/zlib1.dll" "tdlib_install/bin/" -Force
 
-      - name: 6. 上传产物
+      - name: 6. 上传
         uses: actions/upload-artifact@v4
         with:
-          name: tdlib-windows-x64-ready
+          name: tdlib-windows-full-package
           path: tdlib_install/bin/*.dll
