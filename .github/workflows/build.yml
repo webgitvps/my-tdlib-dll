@@ -1,0 +1,50 @@
+name: Manual_Build_TDLib_Windows
+
+# 关键设置：只保留这个，GitHub 永远不会自动运行
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: '选择要编译的 TDLib 分支 (默认 master)'
+        required: true
+        default: 'master'
+
+jobs:
+  build_job:
+    runs-on: windows-2022
+    steps:
+      - name: 1. 安装必要的工具链 (Choco)
+        run: |
+          choco install cmake gperf php openssl -y
+
+      - name: 2. 下载 TDLib 源码
+        uses: actions/checkout@v4
+        with:
+          repository: tdlib/td
+          # 使用手动输入的分支名，默认为 master
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: 3. 配置 CMake (含 OpenSSL 路径)
+        run: |
+          mkdir build
+          cd build
+          cmake -A x64 `
+                -DCMAKE_INSTALL_PREFIX:PATH=../tdlib_install `
+                -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" `
+                -DCMAKE_BUILD_TYPE=Release ..
+
+      - name: 4. 执行编译 (Release 模式)
+        run: |
+          cd build
+          cmake --build . --target install --config Release --parallel 4
+
+      - name: 5. 整理依赖 DLL 文件
+        run: |
+          # 将 OpenSSL 的运行库拷贝到输出目录，方便直接给 Python 使用
+          copy "C:/Program Files/OpenSSL-Win64/bin/*.dll" "tdlib_install/bin/"
+
+      - name: 6. 上传最终产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-windows-x64-manual
+          path: tdlib_install/bin/*.dll
